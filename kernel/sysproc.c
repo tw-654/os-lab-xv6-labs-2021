@@ -7,6 +7,8 @@
 #include "spinlock.h"
 #include "proc.h"
 
+extern struct proc proc[NPROC];
+
 // Structures for custom system calls (must match user/user.h)
 struct procinfo {
   int pid;        // 进程ID
