@@ -1,6 +1,20 @@
 struct stat;
 struct rtcdate;
 
+// Custom system call structures
+struct procinfo {
+  int pid;        // 进程ID
+  int ppid;       // 父进程ID
+  int state;      // 进程状态
+  uint sz;        // 内存大小
+  char name[16];  // 进程名称
+};
+
+struct systime {
+  uint ticks;     // 系统时钟滴答数
+  uint uptime;    // 系统运行时间（秒）
+};
+
 // system calls
 int fork(void);
 int exit(int) __attribute__((noreturn));
@@ -23,6 +37,9 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+int getprocinfo(struct procinfo*);
+int getsystime(struct systime*);
+int setpriority(int pid, int priority);
 
 // ulib.c
 int stat(const char*, struct stat*);

@@ -7,6 +7,20 @@
 #include "spinlock.h"
 #include "proc.h"
 
+// Structures for custom system calls (must match user/user.h)
+struct procinfo {
+  int pid;        // 进程ID
+  int ppid;       // 父进程ID
+  int state;      // 进程状态
+  uint sz;        // 内存大小
+  char name[16];  // 进程名称
+};
+
+struct systime {
+  uint ticks;     // 系统时钟滴答数
+  uint uptime;    // 系统运行时间（秒）
+};
+
 uint64
 sys_exit(void)
 {
@@ -94,4 +108,82 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+// getprocinfo: return current process information
+uint64
+sys_getprocinfo(void)
+{
+  uint64 info_addr;
+  struct proc *p = myproc();
+  struct procinfo info;
+
+  if(argaddr(0, &info_addr) < 0)
+    return -1;
+
+  // Fill in process information
+  info.pid = p->pid;
+  info.ppid = p->parent ? p->parent->pid : 0;
+  info.state = p->state;
+  info.sz = p->sz;
+  safestrcpy(info.name, p->name, sizeof(info.name));
+
+  // Copy to user space
+  if(copyout(p->pagetable, info_addr, (char *)&info, sizeof(info)) < 0)
+    return -1;
+
+  return 0;
+}
+
+// getsystime: return system time information
+uint64
+sys_getsystime(void)
+{
+  uint64 time_addr;
+  struct proc *p = myproc();
+  struct systime time;
+
+  if(argaddr(0, &time_addr) < 0)
+    return -1;
+
+  acquire(&tickslock);
+  time.ticks = ticks;
+  time.uptime = ticks / 100;  // Assuming 100 ticks = 1 second
+  release(&tickslock);
+
+  // Copy to user space
+  if(copyout(p->pagetable, time_addr, (char *)&time, sizeof(time)) < 0)
+    return -1;
+
+  return 0;
+}
+
+// setpriority: set process priority
+uint64
+sys_setpriority(void)
+{
+  int pid, priority;
+  struct proc *p;
+
+  if(argint(0, &pid) < 0)
+    return -1;
+  if(argint(1, &priority) < 0)
+    return -1;
+
+  // Validate priority range (e.g., 0-10)
+  if(priority < 0 || priority > 10)
+    return -1;
+
+  // Find the process
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->pid == pid){
+      p->priority = priority;
+      release(&p->lock);
+      return 0;
+    }
+    release(&p->lock);
+  }
+
+  return -1;  // Process not found
 }
