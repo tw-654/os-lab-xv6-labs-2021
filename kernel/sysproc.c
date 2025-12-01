@@ -95,3 +95,21 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// set process priority (0-31, 0 is highest).
+uint64
+sys_setpriority(void)
+{
+  int prio;
+  if(argint(0, &prio) < 0)
+    return -1;
+  if(prio < 0 || prio > 31)
+    return -1;
+
+  struct proc *p = myproc();
+  acquire(&p->lock);
+  p->priority = prio;
+  release(&p->lock);
+
+  return 0;
+}
