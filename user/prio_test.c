@@ -48,8 +48,9 @@ main(int argc, char *argv[])
 
       int start = uptime();
       volatile int sink = 0;
-      for(int k = 0; k < 50; k++){
-        for(volatile int j = 0; j < 1000000; j++){
+      // 增大循环规模，让不同优先级在 tick 统计上更容易拉开差距
+      for(int k = 0; k < 200; k++){
+        for(volatile int j = 0; j < 2000000; j++){
           sink += j;
         }
       }
