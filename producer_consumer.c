@@ -155,8 +155,8 @@ void* producer(void *arg) {
         stats.total_produced++;
         base_lock_release(&stats.lock);
 
-        // 模拟生产时间（场景1默认：10-60ms）
-        usleep(rand() % 15000 + 5000);
+        // 模拟生产时间（场景3：50-150ms）
+        usleep(rand() % 100000 + 50000);
     }
 
     printf("[Producer-%d] Finished. Total produced: %ld\n",
@@ -188,8 +188,8 @@ void* consumer(void *arg) {
         stats.total_consumed++;
         base_lock_release(&stats.lock);
 
-        // 模拟消费时间（场景1默认：20-100ms）
-        usleep(rand() % 100000 + 50000);
+        // 模拟消费时间（场景3：5-20ms）
+        usleep(rand() % 15000 + 5000);
     }
 
     printf("[Consumer-%d] Finished. Total consumed: %ld\n",
