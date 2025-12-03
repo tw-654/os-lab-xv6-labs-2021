@@ -49,6 +49,10 @@ Statistics stats;
 int next_item_id = 0;
 base_lock_t item_id_lock;
 
+// 跟踪所有生产者是否已完成
+int producers_finished = 0;
+base_lock_t producers_finished_lock;
+
 // 获取当前时间（秒）
 double get_time() {
     struct timeval tv;
@@ -161,6 +165,12 @@ void* producer(void *arg) {
 
     printf("[Producer-%d] Finished. Total produced: %ld\n",
            id, stats.produced[id]);
+    
+    // 标记生产者完成
+    base_lock_acquire(&producers_finished_lock);
+    producers_finished++;
+    base_lock_release(&producers_finished_lock);
+    
     return NULL;
 }
 
@@ -173,10 +183,39 @@ void* consumer(void *arg) {
         // 检查是否所有物品都已生产且被消费完
         base_lock_acquire(&stats.lock);
         int total_consumed_now = stats.total_consumed;
+        int total_produced_now = stats.total_produced;
         base_lock_release(&stats.lock);
 
+        // 如果所有物品都已消费完，退出
         if (total_consumed_now >= expected_total) {
             break;
+        }
+
+        // 检查是否所有生产者都已完成
+        base_lock_acquire(&producers_finished_lock);
+        int all_producers_done = (producers_finished >= NUM_PRODUCERS);
+        base_lock_release(&producers_finished_lock);
+
+        // 如果所有生产者已完成，检查是否可以退出
+        if (all_producers_done) {
+            // 检查缓冲区状态和统计信息
+            int full_sem_value = sem_get_value(&buffer.full);
+            base_lock_acquire(&stats.lock);
+            int total_produced_check = stats.total_produced;
+            int total_consumed_check = stats.total_consumed;
+            base_lock_release(&stats.lock);
+            
+            // 如果所有物品都已生产完，且已生产的物品都已消费完，退出
+            if (total_produced_check >= expected_total && 
+                total_produced_check == total_consumed_check) {
+                break;
+            }
+            
+            // 如果所有生产者已完成，但缓冲区为空，且已生产的物品都已消费完，退出
+            if (full_sem_value == 0 && total_produced_check == total_consumed_check && 
+                total_produced_check >= expected_total) {
+                break;
+            }
         }
 
         // 消费物品
@@ -245,6 +284,8 @@ int main() {
     buffer_init();
     base_lock_init(&stats.lock, "stats_lock");
     base_lock_init(&item_id_lock, "item_id_lock");
+    base_lock_init(&producers_finished_lock, "producers_finished_lock");
+    producers_finished = 0;
 
     // 创建线程
     pthread_t producers[NUM_PRODUCERS];
@@ -287,6 +328,7 @@ int main() {
     sem_destroy(&buffer.mutex);
     base_lock_destroy(&stats.lock);
     base_lock_destroy(&item_id_lock);
+    base_lock_destroy(&producers_finished_lock);
 
     return 0;
 }
