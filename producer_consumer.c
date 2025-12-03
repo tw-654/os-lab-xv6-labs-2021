@@ -169,7 +169,9 @@ void* producer(void *arg) {
     // 标记生产者完成
     base_lock_acquire(&producers_finished_lock);
     producers_finished++;
+    int all_done = (producers_finished >= NUM_PRODUCERS);
     base_lock_release(&producers_finished_lock);
+    
     
     return NULL;
 }
@@ -198,8 +200,6 @@ void* consumer(void *arg) {
 
         // 如果所有生产者已完成，检查是否可以退出
         if (all_producers_done) {
-            // 检查缓冲区状态和统计信息
-            int full_sem_value = sem_get_value(&buffer.full);
             base_lock_acquire(&stats.lock);
             int total_produced_check = stats.total_produced;
             int total_consumed_check = stats.total_consumed;
@@ -211,21 +211,47 @@ void* consumer(void *arg) {
                 break;
             }
             
-            // 如果所有生产者已完成，但缓冲区为空，且已生产的物品都已消费完，退出
-            if (full_sem_value == 0 && total_produced_check == total_consumed_check && 
-                total_produced_check >= expected_total) {
-                break;
+            // 如果所有生产者已完成，但缓冲区为空（full_sem == 0），直接退出
+            // 这样可以避免进入 consume() 函数后阻塞
+            int full_sem_value = sem_get_value(&buffer.full);
+            if (full_sem_value == 0) {
+                // 再次检查统计信息，确保所有物品都已消费完
+                base_lock_acquire(&stats.lock);
+                int final_produced = stats.total_produced;
+                int final_consumed = stats.total_consumed;
+                base_lock_release(&stats.lock);
+                
+                if (final_produced >= expected_total && final_produced == final_consumed) {
+                    break;
+                }
             }
         }
 
-        // 消费物品
+        // 消费物品（只有在没有退出条件满足时才调用）
         Item item = consume(id);
 
         // 更新统计
         base_lock_acquire(&stats.lock);
         stats.consumed[id]++;
         stats.total_consumed++;
+        int total_consumed_after = stats.total_consumed;
+        int total_produced_after = stats.total_produced;
         base_lock_release(&stats.lock);
+        
+        // 消费后再次检查退出条件（防止在 consume() 中阻塞时状态发生变化）
+        if (total_consumed_after >= expected_total) {
+            break;
+        }
+        
+        // 检查是否所有生产者已完成且所有物品都已消费完
+        base_lock_acquire(&producers_finished_lock);
+        int all_producers_done_after = (producers_finished >= NUM_PRODUCERS);
+        base_lock_release(&producers_finished_lock);
+        
+        if (all_producers_done_after && total_produced_after >= expected_total && 
+            total_produced_after == total_consumed_after) {
+            break;
+        }
 
         // 模拟消费时间（场景3：5-20ms）
         usleep(rand() % 15000 + 5000);
