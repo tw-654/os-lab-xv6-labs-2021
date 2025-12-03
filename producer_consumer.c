@@ -41,6 +41,15 @@ typedef struct {
     long total_produced;
     long total_consumed;
     base_lock_t lock;                // 保护统计信息
+    
+    // 缓冲区状态统计
+    long buffer_full_count;          // 缓冲区达到满状态的次数
+    long buffer_empty_count;          // 缓冲区达到空状态的次数
+    long last_buffer_count;           // 上次缓冲区计数（用于检测状态变化）
+    
+    // 生产者阻塞时间统计
+    double producer_blocked_time[NUM_PRODUCERS];  // 每个生产者的总阻塞时间
+    long producer_block_count[NUM_PRODUCERS];     // 每个生产者阻塞次数
 } Statistics;
 
 BoundedBuffer buffer;
@@ -76,8 +85,13 @@ void buffer_init() {
     // 初始化统计信息
     stats.total_produced = 0;
     stats.total_consumed = 0;
+    stats.buffer_full_count = 0;
+    stats.buffer_empty_count = 0;
+    stats.last_buffer_count = 0;
     for (int i = 0; i < NUM_PRODUCERS; i++) {
         stats.produced[i] = 0;
+        stats.producer_blocked_time[i] = 0.0;
+        stats.producer_block_count[i] = 0;
     }
     for (int i = 0; i < NUM_CONSUMERS; i++) {
         stats.consumed[i] = 0;
@@ -86,8 +100,21 @@ void buffer_init() {
 
 // 生产函数
 void produce(Item item) {
+    // 记录开始等待时间（用于统计阻塞时间）
+    double wait_start = get_time();
+    
     // 1. 等待空槽位
     sem_wait(&buffer.empty);   // P(empty)
+    
+    // 记录阻塞时间
+    double wait_end = get_time();
+    double blocked_time = wait_end - wait_start;
+    if (blocked_time > 0.001) {  // 只统计实际阻塞的时间（>1ms）
+        base_lock_acquire(&stats.lock);
+        stats.producer_blocked_time[item.producer_id] += blocked_time;
+        stats.producer_block_count[item.producer_id]++;
+        base_lock_release(&stats.lock);
+    }
 
     // 2. 获取互斥锁
     sem_wait(&buffer.mutex);   // P(mutex)
@@ -96,6 +123,17 @@ void produce(Item item) {
     buffer.buffer[buffer.in] = item;
     buffer.in = (buffer.in + 1) % BUFFER_SIZE;
     buffer.count++;
+    
+    // 检查缓冲区状态变化（在持有mutex锁的情况下检查）
+    if (buffer.count == BUFFER_SIZE && stats.last_buffer_count < BUFFER_SIZE) {
+        base_lock_acquire(&stats.lock);
+        stats.buffer_full_count++;
+        base_lock_release(&stats.lock);
+        printf("[%.3f] [STATUS] Buffer is FULL (count=%d)\n", get_time(), buffer.count);
+    }
+    base_lock_acquire(&stats.lock);
+    stats.last_buffer_count = buffer.count;
+    base_lock_release(&stats.lock);
 
     // 4. 释放互斥锁
     sem_signal(&buffer.mutex); // V(mutex)
@@ -136,6 +174,17 @@ int consume(int consumer_id, Item *item) {
     *item = buffer.buffer[buffer.out];
     buffer.out = (buffer.out + 1) % BUFFER_SIZE;
     buffer.count--;
+    
+    // 检查缓冲区状态变化（在持有mutex锁的情况下检查）
+    if (buffer.count == 0 && stats.last_buffer_count > 0) {
+        base_lock_acquire(&stats.lock);
+        stats.buffer_empty_count++;
+        base_lock_release(&stats.lock);
+        printf("[%.3f] [STATUS] Buffer is EMPTY (count=%d)\n", get_time(), buffer.count);
+    }
+    base_lock_acquire(&stats.lock);
+    stats.last_buffer_count = buffer.count;
+    base_lock_release(&stats.lock);
 
     // 5. 释放互斥锁
     sem_signal(&buffer.mutex); // V(mutex)
@@ -283,6 +332,33 @@ void* consumer(void *arg) {
     return NULL;
 }
 
+// 实时状态监控函数（可选）
+void print_realtime_status() {
+    // 获取互斥锁以安全访问缓冲区
+    sem_wait(&buffer.mutex);
+    
+    int current_count = buffer.count;
+    
+    base_lock_acquire(&stats.lock);
+    long total_produced = stats.total_produced;
+    long total_consumed = stats.total_consumed;
+    long full_count = stats.buffer_full_count;
+    long empty_count = stats.buffer_empty_count;
+    base_lock_release(&stats.lock);
+    
+    printf("\n[%.3f] ========== 实时状态 ==========\n", get_time());
+    printf("缓冲区状态: count=%d/%d (%.1f%%)\n", 
+           current_count, BUFFER_SIZE, 
+           (double)current_count / BUFFER_SIZE * 100.0);
+    printf("生产统计: total=%ld\n", total_produced);
+    printf("消费统计: total=%ld\n", total_consumed);
+    printf("缓冲区满状态次数: %ld\n", full_count);
+    printf("缓冲区空状态次数: %ld\n", empty_count);
+    
+    sem_signal(&buffer.mutex);
+    printf("=====================================\n\n");
+}
+
 // 打印最终统计
 void print_statistics() {
     printf("\n");
@@ -304,10 +380,35 @@ void print_statistics() {
         stats.total_produced == NUM_PRODUCERS * ITEMS_PER_PRODUCER) {
         printf("  ✓ 生产和消费数量匹配\n");
         printf("  ✓ 没有物品丢失\n");
+        printf("  ✓ 没有死锁或数据不一致\n");
     } else {
         printf("  ✗ 错误：生产=%ld, 消费=%ld, 期望=%d\n",
                stats.total_produced, stats.total_consumed,
                NUM_PRODUCERS * ITEMS_PER_PRODUCER);
+        printf("  ✗ 可能存在数据不一致\n");
+    }
+
+    printf("\n缓冲区状态统计:\n");
+    printf("  缓冲区达到满状态次数: %ld\n", stats.buffer_full_count);
+    printf("  缓冲区达到空状态次数: %ld\n", stats.buffer_empty_count);
+    
+    printf("\n生产者阻塞时间统计:\n");
+    double total_blocked_time = 0.0;
+    long total_block_count = 0;
+    for (int i = 0; i < NUM_PRODUCERS; i++) {
+        double avg_blocked = 0.0;
+        if (stats.producer_block_count[i] > 0) {
+            avg_blocked = stats.producer_blocked_time[i] / stats.producer_block_count[i];
+        }
+        printf("  Producer-%d: 总阻塞时间=%.3f秒, 阻塞次数=%ld, 平均阻塞时间=%.3f秒\n",
+               i, stats.producer_blocked_time[i], 
+               stats.producer_block_count[i], avg_blocked);
+        total_blocked_time += stats.producer_blocked_time[i];
+        total_block_count += stats.producer_block_count[i];
+    }
+    if (total_block_count > 0) {
+        printf("  所有生产者平均阻塞时间: %.3f秒\n", 
+               total_blocked_time / total_block_count);
     }
 
     printf("\n信号量状态:\n");
