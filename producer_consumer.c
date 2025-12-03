@@ -109,31 +109,45 @@ void produce(Item item) {
 }
 
 // 消费函数
-Item consume(int consumer_id) {
-    Item item;
-
+// 返回值：-1 表示应该退出（缓冲区为空且所有生产者已完成），0 表示成功消费
+int consume(int consumer_id, Item *item) {
     // 1. 等待满槽位
     sem_wait(&buffer.full);    // P(full)
 
     // 2. 获取互斥锁
     sem_wait(&buffer.mutex);   // P(mutex)
 
-    // 3. 从缓冲区取出物品
-    item = buffer.buffer[buffer.out];
+    // 3. 检查是否应该退出（被唤醒后可能缓冲区为空且所有生产者已完成）
+    if (buffer.count == 0) {
+        // 检查所有生产者是否已完成
+        base_lock_acquire(&producers_finished_lock);
+        int all_producers_done = (producers_finished >= NUM_PRODUCERS);
+        base_lock_release(&producers_finished_lock);
+
+        if (all_producers_done) {
+            // 所有生产者已完成且缓冲区为空，应该退出
+            sem_signal(&buffer.mutex); // V(mutex)
+            // 不需要 sem_signal(&buffer.empty)，因为没有消费物品
+            return -1; // 表示应该退出
+        }
+    }
+
+    // 4. 从缓冲区取出物品
+    *item = buffer.buffer[buffer.out];
     buffer.out = (buffer.out + 1) % BUFFER_SIZE;
     buffer.count--;
 
-    // 4. 释放互斥锁
+    // 5. 释放互斥锁
     sem_signal(&buffer.mutex); // V(mutex)
 
-    // 5. 增加空槽位信号量
+    // 6. 增加空槽位信号量
     sem_signal(&buffer.empty); // V(empty)
 
     // 打印状态
     printf("[%.3f] [Consumer-%d] Consumed item #%d (from Producer-%d), buffer count: %d\n",
-           get_time(), consumer_id, item.id, item.producer_id, buffer.count);
+           get_time(), consumer_id, item->id, item->producer_id, buffer.count);
 
-    return item;
+    return 0; // 成功消费
 }
 
 // 生产者线程
@@ -228,7 +242,13 @@ void* consumer(void *arg) {
         }
 
         // 消费物品（只有在没有退出条件满足时才调用）
-        Item item = consume(id);
+        Item item;
+        int result = consume(id, &item);
+        
+        // 如果 consume() 返回 -1，表示应该退出
+        if (result == -1) {
+            break;
+        }
 
         // 更新统计
         base_lock_acquire(&stats.lock);
@@ -337,6 +357,17 @@ int main() {
     for (int i = 0; i < NUM_PRODUCERS; i++) {
         pthread_join(producers[i], NULL);
     }
+
+    printf("\n[主线程] 所有生产者已完成\n");
+
+    // 所有生产者完成后，唤醒所有等待的消费者
+    // 这样可以让阻塞在 sem_wait(&buffer.full) 的消费者有机会检查退出条件
+    // 注意：这会导致 full_sem 的值可能变为正数，但消费者会在检查后正确退出
+    for (int i = 0; i < NUM_CONSUMERS; i++) {
+        sem_signal(&buffer.full);
+    }
+
+    printf("[主线程] 已唤醒所有消费者，等待消费者退出...\n");
 
     // 等待消费者结束
     for (int i = 0; i < NUM_CONSUMERS; i++) {
