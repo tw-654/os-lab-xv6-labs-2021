@@ -28,6 +28,7 @@ void print_memory_region(const memory_region_t *region) {
 
 // 前向声明
 void analyze_function_call();
+int main();
 
 // 分析程序的内存布局
 void analyze_memory_layout() {
